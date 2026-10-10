@@ -1,4 +1,4 @@
-from uuid import uuid4
+﻿from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -51,7 +51,7 @@ def test_student_can_create_complaint():
 
     assert data["student_id"] == user["id"]
     assert data["title"] == "Broken classroom fan"
-    assert data["category"] == "UNCATEGORIZED"
+    assert data["category"] == "INFRASTRUCTURE"
     assert data["priority"] == "MEDIUM"
     assert data["status"] == "SUBMITTED"
 
@@ -147,11 +147,11 @@ def test_student_can_list_only_their_own_complaints():
     assert response_one.status_code == 200
     assert any(
         item["title"] == complaint_title
-        for item in response_one.json()
+        for item in response_one.json()['items']
     )
     assert all(
         item["student_id"] == student_one["id"]
-        for item in response_one.json()
+        for item in response_one.json()['items']
     )
 
     response_two = client.get(
@@ -162,11 +162,11 @@ def test_student_can_list_only_their_own_complaints():
     assert response_two.status_code == 200
     assert all(
         item["student_id"] == student_two["id"]
-        for item in response_two.json()
+        for item in response_two.json()['items']
     )
     assert all(
         item["title"] != complaint_title
-        for item in response_two.json()
+        for item in response_two.json()['items']
     )
 
 
@@ -351,4 +351,5 @@ def test_admin_status_update_records_history():
                 db.commit()
         finally:
             db.close()
+
 

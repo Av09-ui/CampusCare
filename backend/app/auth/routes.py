@@ -48,10 +48,22 @@ def register_student(
     db.commit()
     db.refresh(user)
 
+    access_token = create_access_token(
+        user_id=user.id,
+        role=user.role,
+    )
+
     return {
+        "access_token": access_token,
+        "token_type": "bearer",
         "id": user.id,
         "email": user.email,
         "role": user.role,
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "role": user.role,
+        },
     }
 
 
@@ -93,3 +105,5 @@ def get_me(current_user: User = Depends(get_current_user)):
         "email": current_user.email,
         "role": current_user.role,
     }
+
+
