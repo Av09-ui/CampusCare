@@ -48,10 +48,19 @@ def register_student(
     db.commit()
     db.refresh(user)
 
+    access_token = create_access_token(
+        user_id=user.id,
+        role=user.role,
+    )
+
     return {
-        "id": user.id,
-        "email": user.email,
-        "role": user.role,
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "role": user.role,
+        },
     }
 
 
