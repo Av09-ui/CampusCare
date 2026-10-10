@@ -1,0 +1,13 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://campuscare:campuscare_dev@host.docker.internal:5432/campuscare
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-campuscare-dev-secret-change-before-production}
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
