@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from app.auth.security import create_access_token, hash_password
 from app.database import SessionLocal
 from app.main import app
-from app.models import Complaint, User
+from app.models import Complaint, ComplaintStatusHistory, User
 
 client = TestClient(app)
 
@@ -265,10 +265,19 @@ def test_admin_can_update_complaint_status():
     finally:
         db = SessionLocal()
         try:
+            from sqlalchemy import delete
+            from app.models import ComplaintStatusHistory
+
+            db.execute(
+                delete(ComplaintStatusHistory).where(
+                    ComplaintStatusHistory.changed_by_admin_id == admin_id
+                )
+            )
+
             admin = db.get(User, admin_id)
             if admin is not None:
                 db.delete(admin)
-                db.commit()
+            db.commit()
         finally:
             db.close()
 
@@ -282,3 +291,64 @@ def test_student_cannot_update_complaint_status():
         json={"status": "RESOLVED"},
     )
     assert response.status_code == 403
+
+
+def test_admin_status_update_records_history():
+    student_token, _ = register_and_login_student()
+
+    created = client.post(
+        "/api/complaints",
+        headers={"Authorization": f"Bearer {student_token}"},
+        json={
+            "title": "History verification complaint",
+            "description": "Checking that status changes are recorded.",
+        },
+    )
+    assert created.status_code == 201
+    complaint_id = created.json()["id"]
+
+    db = SessionLocal()
+    admin_id = None
+
+    try:
+        admin = User(
+            email=unique_email("history-admin"),
+            password_hash=hash_password("AdminPassword123"),
+            role="ADMIN",
+        )
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+        admin_id = admin.id
+        admin_token = create_access_token(admin.id, "ADMIN")
+
+        response = client.patch(
+            f"/api/admin/complaints/{complaint_id}/status",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={"status": "IN_PROGRESS"},
+        )
+        assert response.status_code == 200
+
+        history = db.query(ComplaintStatusHistory).filter_by(
+            complaint_id=complaint_id,
+            changed_by_admin_id=admin_id,
+        ).one()
+
+        assert history.previous_status == "SUBMITTED"
+        assert history.new_status == "IN_PROGRESS"
+        assert history.changed_at is not None
+    finally:
+        try:
+            if admin_id is not None:
+                db.query(ComplaintStatusHistory).filter_by(
+                    changed_by_admin_id=admin_id
+                ).delete(synchronize_session=False)
+
+                admin = db.get(User, admin_id)
+                if admin is not None:
+                    db.delete(admin)
+
+                db.commit()
+        finally:
+            db.close()
+
