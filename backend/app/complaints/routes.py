@@ -1,13 +1,15 @@
-﻿import os
+import os
 import shutil
 from math import ceil
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, Request, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select, func, or_, desc
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.auth.authorization import require_student
+from app.config import settings
 from app.database import SessionLocal
 from app.models import User, Complaint, Support, ProgressUpdate, Resolution, Evidence
 from app.schemas.complaint import (
@@ -24,7 +26,7 @@ from app.schemas.complaint import (
 )
 from app.services.ai import analyze_complaint_text, find_similar_complaints
 
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+UPLOAD_DIR = settings.uploads_dir
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 complaints_router = APIRouter(prefix="/complaints", tags=["Complaints"])
@@ -50,16 +52,38 @@ def save_upload_file(upload_file: UploadFile, subfolder: str = "") -> str:
     return f"/uploads/{filename}"
 
 
-def map_complaint_to_response(complaint: Complaint, all_complaints_for_sim: List[Complaint] = None) -> dict:
+def map_evidence_to_response(evidence: Evidence) -> EvidenceResponse:
+    return EvidenceResponse(
+        id=evidence.id,
+        complaint_id=evidence.complaint_id,
+        support_id=evidence.support_id,
+        resolution_id=evidence.resolution_id,
+        file_name=evidence.file_name,
+        file_path=f"/api/complaints/evidence/{evidence.id}",
+        file_type=evidence.file_type,
+        uploaded_at=evidence.uploaded_at,
+    )
+
+
+def map_complaint_to_response(
+    complaint: Complaint,
+    all_complaints_for_sim: List[Complaint] = None,
+    current_user: Optional[User] = None,
+) -> dict:
+    is_admin = current_user is not None and current_user.role == "ADMIN"
+    is_owner = current_user is not None and complaint.student_id == current_user.id
     support_count = len(complaint.supports) if complaint.supports else 0
     similar = []
     if all_complaints_for_sim:
         sim_data = find_similar_complaints(complaint.description, all_complaints_for_sim, current_id=complaint.id)
         similar = [SimilarComplaintSchema(**s) for s in sim_data]
 
+    ev_list = [map_evidence_to_response(e) for e in (complaint.evidence or [])]
+
     return {
         "id": complaint.id,
-        "student_id": complaint.student_id,
+        "student_id": complaint.student_id if is_admin or is_owner else None,
+        "is_owner": is_owner,
         "title": complaint.title,
         "description": complaint.description,
         "category": complaint.category,
@@ -68,10 +92,11 @@ def map_complaint_to_response(complaint: Complaint, all_complaints_for_sim: List
         "created_at": complaint.created_at,
         "updated_at": complaint.updated_at,
         "support_count": support_count,
-        "student_email": complaint.student.email if complaint.student else None,
+        "student_email": complaint.student.email if is_admin and complaint.student else None,
         "ai_category": complaint.category,
         "ai_priority": complaint.priority,
         "similarity_matches": similar,
+        "evidence": ev_list,
     }
 
 
@@ -87,10 +112,13 @@ def list_complaints(
     search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100),
+    feed: bool = Query(False),
     current_user: User = Depends(require_student),
     db: Session = Depends(get_db),
 ):
-    query = select(Complaint).where(Complaint.student_id == current_user.id)
+    query = select(Complaint)
+    if not feed:
+        query = query.where(Complaint.student_id == current_user.id)
 
     if category:
         query = query.where(Complaint.category == category)
@@ -114,7 +142,7 @@ def list_complaints(
     # Get sample for similarity
     all_complaints = db.scalars(select(Complaint).limit(50)).all()
 
-    items = [map_complaint_to_response(c, all_complaints) for c in complaints]
+    items = [map_complaint_to_response(c, all_complaints, current_user) for c in complaints]
     total_pages = ceil(total / limit) if total > 0 else 1
 
     return {
@@ -126,8 +154,74 @@ def list_complaints(
     }
 
 
+@complaints_router.get("/feed", response_model=PaginatedComplaintResponse)
+def list_campus_feed(
+    category: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
+    current_user: User = Depends(require_student),
+    db: Session = Depends(get_db),
+):
+    return list_complaints(
+        category=category,
+        priority=priority,
+        status=status,
+        search=search,
+        page=page,
+        limit=limit,
+        feed=True,
+        current_user=current_user,
+        db=db,
+    )
+
+
+@complaints_router.get("/evidence/{evidence_id}")
+def get_evidence(
+    evidence_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    evidence = db.get(Evidence, evidence_id)
+    if not evidence:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "Evidence not found"},
+        )
+
+    is_admin = current_user.role == "ADMIN"
+    support = db.get(Support, evidence.support_id) if evidence.support_id else None
+    is_support_owner = support is not None and support.student_id == current_user.id
+    complaint = db.get(Complaint, evidence.complaint_id) if evidence.complaint_id else None
+    resolution = db.get(Resolution, evidence.resolution_id) if evidence.resolution_id else None
+    is_campus_visible = complaint is not None or (
+        resolution is not None and db.get(Complaint, resolution.complaint_id) is not None
+    )
+    if not is_admin and not is_support_owner and not is_campus_visible:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "FORBIDDEN", "message": "Evidence access is not permitted"},
+        )
+
+    filename = os.path.basename(evidence.file_path)
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.isfile(file_path):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "NOT_FOUND", "message": "Evidence file not found"},
+        )
+
+    return FileResponse(file_path, media_type=evidence.file_type, filename=evidence.file_name)
+
+
 @complaints_router.get("/{complaint_id}", response_model=ComplaintDetailResponse)
-def get_complaint(complaint_id: int, db: Session = Depends(get_db)):
+def get_complaint(
+    complaint_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     complaint = db.scalar(select(Complaint).where(Complaint.id == complaint_id))
     if not complaint:
         raise HTTPException(
@@ -136,24 +230,13 @@ def get_complaint(complaint_id: int, db: Session = Depends(get_db)):
         )
 
     all_complaints = db.scalars(select(Complaint).limit(50)).all()
-    base_data = map_complaint_to_response(complaint, all_complaints)
+    is_admin = current_user.role == "ADMIN"
+    base_data = map_complaint_to_response(complaint, all_complaints, current_user)
 
     # Build supports
     supports = []
-    for s in complaint.supports:
-        ev_list = [
-            EvidenceResponse(
-                id=e.id,
-                complaint_id=e.complaint_id,
-                support_id=e.support_id,
-                resolution_id=e.resolution_id,
-                file_name=e.file_name,
-                file_path=e.file_path,
-                file_type=e.file_type,
-                uploaded_at=e.uploaded_at,
-            )
-            for e in s.evidence
-        ]
+    for s in complaint.supports if is_admin else []:
+        ev_list = [map_evidence_to_response(e) for e in s.evidence]
         supports.append(
             SupportResponse(
                 id=s.id,
@@ -171,10 +254,10 @@ def get_complaint(complaint_id: int, db: Session = Depends(get_db)):
         ProgressUpdateResponse(
             id=p.id,
             complaint_id=p.complaint_id,
-            admin_id=p.admin_id,
+            admin_id=p.admin_id if is_admin else None,
             message=p.message,
             created_at=p.created_at,
-            admin_email=p.admin.email if p.admin else None,
+            admin_email=p.admin.email if is_admin and p.admin else None,
         )
         for p in complaint.progress_updates
     ]
@@ -182,31 +265,22 @@ def get_complaint(complaint_id: int, db: Session = Depends(get_db)):
     # Build resolution
     resolution = None
     if complaint.resolution:
-        res_ev = [
-            EvidenceResponse(
-                id=e.id,
-                complaint_id=e.complaint_id,
-                support_id=e.support_id,
-                resolution_id=e.resolution_id,
-                file_name=e.file_name,
-                file_path=e.file_path,
-                file_type=e.file_type,
-                uploaded_at=e.uploaded_at,
-            )
-            for e in complaint.resolution.evidence
-        ]
+        res_ev = [map_evidence_to_response(e) for e in complaint.resolution.evidence]
         resolution = ResolutionResponse(
             id=complaint.resolution.id,
             complaint_id=complaint.resolution.complaint_id,
-            admin_id=complaint.resolution.admin_id,
+            admin_id=complaint.resolution.admin_id if is_admin else None,
             resolution_text=complaint.resolution.resolution_text,
             resolved_at=complaint.resolution.resolved_at,
-            admin_email=complaint.resolution.admin.email if complaint.resolution.admin else None,
+            admin_email=complaint.resolution.admin.email if is_admin and complaint.resolution.admin else None,
             evidence=res_ev,
         )
 
+    complaint_evidence = [map_evidence_to_response(e) for e in (complaint.evidence or [])]
+
     return {
         **base_data,
+        "evidence": complaint_evidence,
         "supports": supports,
         "progress_updates": progress_updates,
         "resolution": resolution,
@@ -275,7 +349,7 @@ async def create_complaint(
         db.commit()
         db.refresh(complaint)
 
-    return map_complaint_to_response(complaint)
+    return map_complaint_to_response(complaint, current_user=current_user)
 
 
 @complaints_router.post("/{complaint_id}/support", status_code=201)
@@ -360,7 +434,7 @@ def assign_complaint(
     complaint.status = "ASSIGNED"
     db.commit()
     db.refresh(complaint)
-    return map_complaint_to_response(complaint)
+    return map_complaint_to_response(complaint, current_user=current_user)
 
 
 @admin_router.post("/{complaint_id}/progress")
@@ -442,7 +516,7 @@ def resolve_complaint(
                 db.add(evidence)
         db.commit()
 
-    return map_complaint_to_response(complaint)
+    return map_complaint_to_response(complaint, current_user=current_user)
 
 
 

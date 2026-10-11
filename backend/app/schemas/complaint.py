@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,7 +29,7 @@ class EvidenceResponse(BaseModel):
 class SupportResponse(BaseModel):
     id: int
     complaint_id: int
-    student_id: int
+    student_id: Optional[int] = None
     comment: Optional[str] = None
     created_at: datetime
     student_email: Optional[str] = None
@@ -39,7 +39,7 @@ class SupportResponse(BaseModel):
 class ProgressUpdateResponse(BaseModel):
     id: int
     complaint_id: int
-    admin_id: int
+    admin_id: Optional[int] = None
     message: str
     created_at: datetime
     admin_email: Optional[str] = None
@@ -48,7 +48,7 @@ class ProgressUpdateResponse(BaseModel):
 class ResolutionResponse(BaseModel):
     id: int
     complaint_id: int
-    admin_id: int
+    admin_id: Optional[int] = None
     resolution_text: str
     resolved_at: datetime
     admin_email: Optional[str] = None
@@ -57,7 +57,8 @@ class ResolutionResponse(BaseModel):
 
 class ComplaintResponse(BaseModel):
     id: int
-    student_id: int
+    student_id: Optional[int] = None
+    is_owner: bool = False
     title: str
     description: str
     category: str
@@ -70,6 +71,7 @@ class ComplaintResponse(BaseModel):
     ai_category: Optional[str] = None
     ai_priority: Optional[str] = None
     similarity_matches: Optional[List[SimilarComplaintSchema]] = None
+    evidence: List[EvidenceResponse] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -78,6 +80,8 @@ class ComplaintDetailResponse(ComplaintResponse):
     progress_updates: List[ProgressUpdateResponse] = Field(default_factory=list)
     resolution: Optional[ResolutionResponse] = None
     supports: List[SupportResponse] = Field(default_factory=list)
+
+
 
 
 class PaginatedComplaintResponse(BaseModel):

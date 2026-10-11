@@ -8,6 +8,7 @@ ENV_PATH = BASE_DIR / ".env"
 
 class Settings(BaseSettings):
     database_url: str = f"sqlite:///{BASE_DIR / 'campuscare.db'}"
+    uploads_dir: str = str(BASE_DIR / "uploads")
     jwt_secret_key: str = "campuscare-super-secret-key-dev-12345"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
