@@ -28,3 +28,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# User-uploaded evidence and generated CI artifacts
+backend/uploads/
+backend/ci-test.db
+backend/ci-uploads/
